@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  テナント分離モードを有効にしたLambda関数とAPI Gateway REST APIのサンプル
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  # テナント分離モードを有効にしたLambda関数
+  TenantIsolatedFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tenant-isolated-function
+      Runtime: python3.13
+      Handler: app.lambda_handler
+      Code: functions/
+      Role: !GetAtt TenantIsolatedFunctionRole.Arn
+      TenancyConfig:
+        TenantIsolationMode: PER_TENANT
+
+  # Lambda関数の実行ロール
+  TenantIsolatedFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # API Gateway REST API
+  TenantApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: tenant-isolated-api
+      Description: テナント分離Lambda関数と統合されたREST API
+
+  # APIリソース (/process)
+  TenantApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref TenantApi
+      ParentId: !GetAtt TenantApi.RootResourceId
+      PathPart: process
+
+  # POSTメソッド（x-tenant-id ヘッダーを X-Amz-Tenant-Id にマッピング）
+  TenantApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TenantApi
+      ResourceId: !Ref TenantApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.header.x-tenant-id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TenantIsolatedFunction.Arn}/invocations
+        RequestParameters:
+          integration.request.header.X-Amz-Tenant-Id: method.request.header.x-tenant-id
+
+  # APIデプロイメント
+  TenantApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: TenantApiMethod
+    Properties:
+      RestApiId: !Ref TenantApi
+
+  # APIステージ
+  TenantApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref TenantApi
+      DeploymentId: !Ref TenantApiDeployment
+      StageName: prod
+
+  # API GatewayからLambdaを呼び出すための権限
+  TenantApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref TenantIsolatedFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${TenantApi}/*/POST/process
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${TenantApi}.execute-api.${AWS::Region}.amazonaws.com/prod/process
+
+  TenantIsolatedFunctionArn:
+    Description: Tenant-isolated Lambda function ARN
+    Value: !GetAtt TenantIsolatedFunction.Arn
